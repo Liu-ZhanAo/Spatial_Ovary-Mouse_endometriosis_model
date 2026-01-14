@@ -1,0 +1,1361 @@
+setwd("D:/base_on_rds_result")
+
+library(Seurat)
+packageVersion("Seurat")
+library(SeuratObject)
+library(devtools)
+library(hdf5r)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(SeuratDisk)
+library(pheatmap)
+library(FNN)
+library(psych)
+library(base64enc)
+library(png)
+library(grid)
+library(grDevices)
+
+plot_cell<-function(Seu_ob,cell_name_vec,Seu_meth,note){
+  a<-list()
+  a$note<-cell_name_vec
+  names(a)<-note
+  DimPlot(Seu_ob, 
+          reduction = Seu_meth, 
+          group.by = "seurat_clusters", 
+          label = F, 
+          cells.highlight = a, 
+          cols.highlight = "salmon",  # higj light
+          cols = "lightblue1"      # 
+  )   
+}
+
+get_umap_center<-function(Seu_ob,union_method="ward.D2"){
+  # get umap Coordinate
+  umap_data <- Embeddings(Seu_ob, reduction = "umap")
+  meta_data <- Seu_ob@meta.data
+  
+  #unin
+  umap_with_clusters <- data.frame(UMAP_1 = umap_data[, 1],
+                                   UMAP_2 = umap_data[, 2],
+                                   seurat_clusters = meta_data$seurat_clusters)
+  #get center
+  cluster_centers_umap <- umap_with_clusters %>%
+    group_by(seurat_clusters) %>%
+    summarise(center_UMAP1 = mean(UMAP_1, na.rm = TRUE),
+              center_UMAP2 = mean(UMAP_2, na.rm = TRUE)) %>%
+    as.data.frame()
+  
+  #get distance
+  n_clusters <- nrow(cluster_centers_umap)
+  dist_matrix_umap <- matrix(NA, nrow = n_clusters, ncol = n_clusters)
+  rownames(dist_matrix_umap) <- colnames(dist_matrix_umap) <- cluster_centers_umap$seurat_clusters
+  
+  for (i in 1:n_clusters) {
+    for (j in 1:n_clusters) {
+      if (i != j) {
+        dist_umap1 <- cluster_centers_umap$center_UMAP1[i] - cluster_centers_umap$center_UMAP1[j]
+        dist_umap2 <- cluster_centers_umap$center_UMAP2[i] - cluster_centers_umap$center_UMAP2[j]
+        dist_matrix_umap[i, j] <- sqrt(dist_umap1^2 + dist_umap2^2)
+      }
+    }
+  }
+  
+  #print(dist_matrix_umap)
+  dist_matrix_umap[is.na(dist_matrix_umap)] <- 0
+  
+  
+  class(dist_matrix_umap)
+  
+  
+  dist_matrix_umap_trans <- as.dist(dist_matrix_umap)
+  hc <- hclust(dist_matrix_umap_trans, method = union_method)
+  
+  plot(hc, main = "Cluster Dendrogram (UMAP Distance)", xlab = "Clusters", 
+       sub = "", ylab = "Height", labels = hc$labels, hang = -1)
+  
+  print(hc$labels[hc$order])
+  
+}
+
+
+for_bubble_plot_fast<-function(Seu_ob,target_col,
+                               gene_note_frame,gene_col,gene_note_col,
+                               cluster_note_frame,cluster_col,cluster_note_col,
+                               lowcolor,highcolor){
+  expr_data <- Seu_ob@assays$RNA$data[gene_note_frame[[gene_col]], , drop = FALSE]
+  meta_data <- Seu_ob@meta.data
+  
+  clum_exp <- sapply(cluster_note_frame[[cluster_col]], function(c) {
+    cells <- rownames(meta_data[meta_data[[target_col]] == c, ])
+    if (length(cells) == 0) return(rep(0, nrow(gene_note_frame)))
+    rowMeans(expr_data[, cells, drop = FALSE])
+  }) %>% as.data.frame()
+  colnames(clum_exp) <- cluster_note_frame[[cluster_note_col]]
+  rownames(clum_exp) <- gene_note_frame[[gene_note_col]]
+  
+  clum_rate <- sapply(cluster_note_frame[[cluster_col]], function(c) {
+    cells <- rownames(meta_data[meta_data[[target_col]] == c, ])
+    if (length(cells) == 0) return(rep(0, nrow(gene_note_frame)))
+    rowSums(expr_data[, cells, drop = FALSE] > 0) / length(cells) * 100
+  }) %>% as.data.frame()
+  colnames(clum_rate) <- cluster_note_frame[[cluster_note_col]]
+  rownames(clum_rate) <- gene_note_frame[[gene_note_col]]
+  
+  print(clum_exp)
+  print(clum_rate)
+  
+  library(tidyr)
+  library(dplyr)
+  
+  clum_exp_long <- clum_exp %>%
+    tibble::rownames_to_column(var = "Gene") %>%  
+    pivot_longer(
+      cols = -Gene,            
+      names_to = "Cluster",      
+      values_to = "Avg_Expr"      
+    ) 
+  
+  clum_rate_long <- clum_rate %>%
+    tibble::rownames_to_column(var = "Gene") %>%  
+    pivot_longer(
+      cols = -Gene,            
+      names_to = "Cluster",      
+      values_to = "Perc_Expr"      
+    ) 
+  
+  frame_plot<-merge(clum_exp_long, clum_rate_long, by = c("Gene", "Cluster"))
+  
+  frame_plot$Cluster <- factor(frame_plot$Cluster, 
+                               levels = cluster_note_frame[[cluster_note_col]])
+  frame_plot$Gene <- factor(frame_plot$Gene, 
+                            levels = rev(gene_note_frame[[gene_note_col]]))
+  
+  p<-ggplot(frame_plot, aes(x = Cluster, y = Gene, size = Perc_Expr, color = Avg_Expr)) +
+    geom_point() +
+    scale_size(range = c(1, 8)) + 
+    scale_color_gradient(low = lowcolor, high = highcolor) + 
+    labs(title = "Markers exp.",x = "Cluster", y = "Gene", size = "Percentage Expressed", 
+         color = "Average Expression") +  
+    theme_minimal() +  #
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 15), 
+      axis.text.y = element_text(size = 15),  
+      axis.title = element_text(size = 15),  
+      plot.title = element_text(size = 20, hjust = 0.5),  #
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5)
+    )
+  
+  
+  print(p)
+  
+  return(frame_plot)
+  
+}
+
+
+slice_boxcut<-function(spatial_data,x,y,size){
+  a<-as.data.frame(cbind(spatial_data[[x]],spatial_data[[y]],rep("skyblue1",nrow(spatial_data))))
+  colnames(a)<-c("x","y","color")
+  rownames(a)<-rownames(spatial_data)
+  
+  a$x<-as.numeric(a$x)
+  a$y<-as.numeric(a$y)
+  
+  data<-a
+  
+  x_range <- range(data$x)
+  y_range <- range(data$y)
+  
+  n_x <- abs(diff(as.numeric(x_range)))/size %>% floor  
+  n_y <- abs(diff(as.numeric(y_range)))/size %>% floor  
+  
+  #get new size
+  x_width <- diff(as.numeric(x_range)) / n_x
+  y_height <- diff(as.numeric(y_range)) / n_y
+  
+  #get box
+  x_breaks <- seq(x_range[1], x_range[2], length.out = n_x + 1)
+  y_breaks <- seq(y_range[1], y_range[2], length.out = n_y + 1)
+  
+  #arrange
+  data$x_bin <- cut(data$x, breaks = x_breaks, include.lowest = TRUE)
+  data$y_bin <- cut(data$y, breaks = y_breaks, include.lowest = TRUE)
+  
+  data$cell_id <- interaction(data$x_bin, data$y_bin) %>% as.character()
+  
+  library(ggplot2)
+  
+  p<-ggplot(data, aes(x, y, color = color)) +
+    geom_point() +
+    geom_vline(xintercept = x_breaks, color = "gray", linetype = "dashed") +
+    geom_hline(yintercept = y_breaks, color = "gray", linetype = "dashed") +
+    labs(title = "slice", x = "X", y = "Y") +
+    theme_minimal()+theme(legend.position = "none")+
+    labs(caption = paste("true size: X/Y :",x_width,"/",y_height)) #+theme(legend.position = "none")             
+  print(p)
+  print(paste("true size: X/Y :",x_width,"/",y_height))
+  return(data)
+}
+
+
+#slice_boxsel_base_on_targetcell(med_m_1,"x","y","cell_id","ovary_character",thrs_rate=0.1,thrs_count=1)
+
+slice_boxsel_base_on_targetcell<-function(slice_boxcut_frame,x,y,cell_id,is_target_cell_1,thrs_rate,thrs_count){
+  
+  k<-slice_boxcut_frame[,c(x,y,cell_id,is_target_cell_1)]
+  colnames(k)<-c("x","y","cell_id","is_target_cell_1")
+  rownames(k)<-rownames(slice_boxcut_frame)
+  
+  result <- k %>%
+    group_by(cell_id) %>%
+    summarise(
+      count_1 = sum(is_target_cell_1 == 1, na.rm = TRUE),
+      total = n(),
+      proportion = count_1 / total
+    ) %>%
+    arrange(desc(count_1))  # sort by count 1
+  
+  result$row_id <- 1:nrow(result)
+  
+  head(result)
+  tail(result)
+  
+  p<-ggplot(result, aes(x = row_id)) +
+    geom_point(aes(y = count_1, color = "count_1"), size = 2) +
+    geom_point(aes(y = total, color = "total"), size = 2) +
+    scale_color_manual(values = c("count_1" = "red", "total" = "blue")) +
+    labs(title = "count_1 and total (sort)",
+         x = "rank",
+         y = "value",
+         color = "type") +
+    theme_minimal()
+  
+  print(p)
+  
+  p<-ggplot(result, aes(x = row_id)) +
+    geom_point(aes(y = proportion, color = "proportion"), size = 2) +
+    scale_color_manual(values = c("proportion" = "forestgreen")) +
+    labs(title = "proportion (count sort)",
+         x = "rank",
+         y = "%",
+         color = "type") +
+    theme_minimal()
+  
+  print(p)
+  
+  result_sel<-result[result$count_1>=thrs_count | result$proportion>=thrs_rate,]
+  cell_sel<-slice_boxcut_frame[slice_boxcut_frame$cell_id %in% result_sel$cell_id,] %>% rownames()
+  
+  e<-list()
+  e$sel_box<-cell_sel
+  
+  p<-DimPlot(Seurat_object, 
+             size=0.75,
+             reduction = "spatial", 
+             group.by = "seurat_clusters", 
+             label = F, 
+             cells.highlight = e, 
+             cols.highlight = "salmon",  # higj light
+             cols = "forestgreen"      # 
+  )+ggtitle("Spatial Distribution")#    
+  
+  print(p)
+  return(result_sel)
+}
+
+
+# get_box_Component(med_m_1[med_m_1$box_ori=="endo",]$cell_id,
+#                   cell_box_note_frame,
+#                   "cell_id",
+#                   "cell_type",
+#                   "endo box : component")
+
+get_box_Component<-function(box_vec,cell_box_note_frame,box_col,note_col,plot_title,color="tomato"){
+  
+  a<-cell_box_note_frame[cell_box_note_frame[[box_col]] %in% box_vec,]
+  b<-table(a[[note_col]]) %>% sort()
+  i<-b/nrow(a) *100
+  
+  ii<-as.data.frame(cbind(names(i),i))
+  ii$name<-ii$V1
+  ii$i<-as.numeric(ii$i)
+  head(ii)
+  
+  p<-ggplot(ii, aes(x = reorder(name, i), y = i)) +
+    geom_bar(stat = "identity", fill = color, width = 0.7, alpha = 0.8) +  #turquoise3
+    geom_text(aes(label = paste0(round(i, 2), "%")), 
+              hjust = -0.1, size = 3.5, color = "black") +
+    scale_y_continuous(
+      expand = expansion(mult = c(0, 0.1)),
+      labels = scales::number_format(accuracy = 0.01)  #
+    ) +
+    coord_flip() +
+    labs(
+      title = plot_title,
+      x = "",
+      y = "(%)",
+      caption = ""  # 
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0, face = "bold", size = 14), 
+      axis.title.x = element_text(size = 14),  
+      axis.title.y = element_text(size = 14),  
+      axis.text.y = element_text(size = 12, color = "black"),  
+      axis.line.x = element_line(color = "black", linewidth = 0.5),  #
+      axis.line.y = element_line(color = "black", linewidth = 0.5),  # 
+      panel.grid = element_blank(),  # 
+      panel.grid.major.y = element_blank()
+      #plot.margin = margin(10, 20, 10, 10)
+    )  
+  
+  print(p)
+  return(i)
+}
+
+for_type_gene_exp<-function(Seu_ob,type_vec,type_col,gene){
+  clum<-rep(NA,length(type_vec))
+  for(i in 1:length(type_vec)){
+    a<-Seu_ob@meta.data[Seu_ob@meta.data[[type_col]]==type_vec[i],] %>% rownames()
+    b<-Seu_ob@assays$RNA$data[gene,a] %>% expm1() %>% mean() #%>% log2()
+    clum[i]<-b
+    names(clum)[i]<-type_vec[i]
+  }
+  return(clum)
+}
+# 
+
+get_spatial_distance<-function(Seu_ob,Seu_meth,spatial_frame,core_cell_vec,target_cell_vec){
+  
+  if (length(intersect(core_cell_vec,target_cell_vec))!=0) {
+    cat("intersect(core_cell_vec,target_cell_vec) is not NULL \n") 
+    stop("wrong")  }
+  
+  med<-list()
+  med$core_cell_vec<-core_cell_vec
+  med$target_cell_vec<-target_cell_vec
+  
+  p<-DimPlot(Seu_ob, 
+             reduction = Seu_meth, 
+             group.by = "seurat_clusters", 
+             label = F, 
+             cells.highlight = med,
+             cols.highlight = c("orange","forestgreen"),
+             cols = "lightskyblue"# 
+  ) 
+  print(p)
+  #
+  core_cell_frame<-spatial_frame[core_cell_vec,]
+  target_cell_frame<-spatial_frame[target_cell_vec,]
+  
+  nn <- get.knnx(core_cell_frame, target_cell_frame, k = 1)
+  nn_min_distances <- as.data.frame(nn $nn.dist)
+  rownames(nn_min_distances) <- rownames(target_cell_frame)
+  
+  colnames(nn_min_distances)[1]<-"um"
+  nn_min_distances$dist_um<-nn_min_distances$um
+  
+  return(nn_min_distances)
+}
+
+
+cor_dist <- function(dist, thrs, object) {
+  colnames(dist) <- c("dist_px", "dist_um") 
+  dist.1 <- na.omit(dist) #remove spots without distance measurement to IHSs
+  dist.1 <- dist.1[dist.1[,2] <= thrs,] #set distance threshold for correlation analysis 
+  dat1 <- as.matrix(t(object@assays$RNA$scale.data)) # create a transposed dataframe (or matrix) for expression data
+  dat2 <- dat1[rownames(dat1) %in% rownames(dist.1),] #intersect selection 
+  dist3 <- dist.1[rownames(dist.1) %in% rownames(dat2),] #intersect in both directions          
+  
+  
+  cor.roi_gex <- sapply(1:ncol(dat2), function(x){ #sapply function to create list with values of interest and return list of dataframes
+    res <- corr.test(dist3[,2], dat2[,x], 
+                     method = "pearson", adjust = "bonferroni")
+    return(list(data.frame(correlation_coeficent = res$r , p.value = res$p, p.adj = res$p.adj, row.names = colnames(dat2)[x])))
+    
+  })
+  
+  cor_IHS <- do.call(rbind.data.frame, cor.roi_gex) #bin list entries to new data frame
+  
+  cor_IHS <- cor_IHS[order(-cor_IHS$correlation_coeficent),]
+  
+  return(cor_IHS)
+  
+}
+
+
+cell_dist_marker_found<-function(Seu_ob,dist_map,gene_list,core_cell,target_cell,um,rate,core_note,target_note){
+  thrs=um/rate
+  core_cell_map<-na.omit(dist_map[core_cell,])
+  target_cell_map<-na.omit(dist_map[target_cell,])
+  
+  nn<-get.knnx(core_cell_map, target_cell_map, k = 1)
+  nn<- as.data.frame(nn$nn.dist)
+  rownames(nn)<-rownames(target_cell_map)
+  
+  colnames(nn)[1]<-"dist"
+  nn$dist_standby<-nn$dist
+  
+  a<-Seu_ob
+  
+  a@meta.data$dist<-"unselect"
+  a@meta.data$dist[rownames(a@meta.data) %in% rownames(nn[nn$dist<thrs,])]<-"< thrs"
+  a@meta.data$dist[rownames(a@meta.data) %in% rownames(nn[nn$dist>=thrs,])]<-"> thrs"
+  
+  
+  markers <- FindMarkers(
+    a,
+    ident.1 = "< thrs",
+    ident.2 = "> thrs",
+    group.by = "dist",
+    min.pct = 0,                
+    logfc.threshold = 0, # 
+    features = gene_list            # 
+  )
+  
+  med_n<-list()
+  med_n$'target < thrs'<-rownames(nn[nn$dist<thrs,]) 
+  med_n$'target > thrs'<-rownames(nn[nn$dist>=thrs,]) 
+  med_n$'core'<-core_cell
+  
+  #
+  p<-DimPlot(Seurat_object,
+             size=0.75,
+             reduction = "spatial", 
+             group.by = "seurat_clusters", 
+             label = F, 
+             cells.highlight = med_n, 
+             cols.highlight = c("orange","palegreen3","blue"),  # high light
+             cols = "lightblue1"      # 
+  )+ggtitle("Spatial Distribution") +                     # 
+    labs(caption = paste("thrs is",um,"um,","core cell is",core_note,",","target cell is",target_note)) #+theme(legend.position = "none")             
+  #
+  print(p)
+  
+  return(markers)
+  
+  
+}
+
+get_spatial_distance<-function(Seu_ob,Seu_meth,spatial_frame,core_cell_vec,target_cell_vec){
+  
+  if (length(intersect(core_cell_vec,target_cell_vec))!=0) {
+    cat("intersect(core_cell_vec,target_cell_vec) is not NULL \n") 
+    stop("wrong")  }
+  
+  med<-list()
+  med$core_cell_vec<-core_cell_vec
+  med$target_cell_vec<-target_cell_vec
+  
+  p<-DimPlot(Seu_ob, 
+             reduction = Seu_meth, 
+             group.by = "seurat_clusters", 
+             label = F, 
+             cells.highlight = med,
+             cols.highlight = c("orange","forestgreen"),
+             cols = "lightskyblue"# 
+  ) 
+  print(p)
+  #
+  core_cell_frame<-spatial_frame[core_cell_vec,]
+  target_cell_frame<-spatial_frame[target_cell_vec,]
+  
+  nn <- get.knnx(core_cell_frame, target_cell_frame, k = 1)
+  nn_min_distances <- as.data.frame(nn $nn.dist)
+  rownames(nn_min_distances) <- rownames(target_cell_frame)
+  
+  colnames(nn_min_distances)[1]<-"px"
+  nn_min_distances$dist_px<-nn_min_distances$px
+  
+  return(nn_min_distances)
+}
+
+dist_scale_frame_sel<-function(Seu_ob,gene_list,dist_frame,col_um,thrs){
+  a<-Seu_ob@assays$RNA$data[gene_list,]
+  a_scale<-scale(t(a))
+  
+  dist_frame_under_thrs<-dist_frame[dist_frame[[col_um]]<thrs,]
+  a_scale<-a_scale[rownames(dist_frame_under_thrs),]
+  c<-cbind(dist_frame_under_thrs,a_scale)
+  
+  return(c)
+}
+
+
+get_cor_frame<-function(dist_exp_frame,dist_col,exp_col){
+  a<-cbind(dist_exp_frame[[dist_col]],dist_exp_frame[,exp_col]) %>% as.data.frame()
+  colnames(a)<-c("um",exp_col)
+  
+  med_k_2<-a
+  
+  clum<-matrix(NA,ncol=4,nrow =(ncol(med_k_2)-1) ) %>% as.data.frame()
+  colnames(clum)<-c("cor_r","95%_left","95%_right","p.val")
+  clum
+  for(i in 2:ncol(med_k_2)){
+    a<-cor.test(med_k_2$um,med_k_2[,i])
+    clum[i-1,1]<-a$estimate 
+    clum[i-1,2]<-a$conf.int[1]
+    clum[i-1,3]<-a$conf.int[2]
+    clum[i-1,4]<-a$p.value 
+    rownames(clum)[i-1]<-colnames(med_k_2)[i]
+  }
+  clum
+  clum$rownames <- factor(rownames(clum), levels = rownames(clum))
+  
+  p<-ggplot(clum, aes(x = cor_r, y = factor(rownames(clum), levels = rev(rownames(clum))))) +  
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +  # add x=0
+    geom_errorbarh(
+      aes(xmin = `95%_left`, xmax = `95%_right`),  # 95%
+      height = 0.2,                                #length error bar
+      color = "blue",
+      linewidth = 0.8
+    ) +
+    # 
+    geom_point(size = 3, color = "red") +
+    
+    # 
+    labs(
+      x = "Correlation Coefficient (95% CI)",
+      y = "",
+      title = "Correlations : Gene_expr vs. Distance"
+    ) +
+    
+    # 
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0, face = "bold"),
+      axis.title.y = element_blank(), 
+      panel.grid.major.y = element_blank(),
+      axis.title.x = element_text(size = 14),  
+      axis.text.y = element_text(size = 14), 
+      axis.line.x = element_line(color = "black", linewidth = 0.5),  
+      axis.line.y = element_line(color = "black", linewidth = 0.5),  
+      panel.grid = element_blank()
+    )+
+    geom_text(
+      aes(x = `cor_r`, label = paste("p.val =",sprintf("%.3f", p.val))), 
+      hjust = 0.5,                                        
+      vjust = -0.7,                                          
+      size = 3.5,                                           
+      color = "red"
+    )
+  print(p)
+  return(clum)
+  
+}
+
+
+plot_gene_exp_vs_dist<-function(dist_exp_frame, dist_col, exp_col){
+  q<-ggplot(dist_exp_frame , aes_string(x= dist_col, y= exp_col)) + 
+    geom_point(size = 1) + 
+    theme_classic()
+  
+  #print(q)
+  
+  p<-ggplot(dist_exp_frame , aes_string(x= dist_col, y= exp_col)) + 
+    geom_smooth( method = "loess", n = 10, span = 2,color = "orangered", linewidth = 1.2, fill = "skyblue1", alpha = 0.3) +
+    labs(
+      x = "distance to core area. (um)",
+      y = exp_col,
+      title = paste("Gnen expression :",exp_col)
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0, face = "bold"),
+      axis.title.x = element_text(size = 14),  
+      axis.title.y = element_text(size = 14), 
+      axis.line.x = element_line(color = "black", linewidth = 0.5),  
+      axis.line.y = element_line(color = "black", linewidth = 0.5),  
+      panel.grid = element_blank()
+    )
+  print(p)
+}
+
+
+
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+Seurat_object<-readRDS("M_endo_1_2_4.rds")
+Seurat_object
+#
+head(Seurat_object@meta.data)
+
+DimPlot(Seurat_object, reduction = "umap", group.by = "seurat_clusters", label = TRUE)
+DimPlot(Seurat_object, reduction = "tsne", group.by = "seurat_clusters", label = TRUE)
+DimPlot(Seurat_object, reduction = "spatial", group.by = "seurat_clusters", label = TRUE)
+
+##########################################################################################################
+DimPlot(Seurat_object, reduction = "umap", group.by = "seurat_clusters", label = T) +
+  ggtitle("Seurat cluster : All samples") +
+  theme(legend.position = "right")
+DimPlot(Seurat_object, reduction = "umap", group.by = "seurat_clusters", label = F) +
+  ggtitle("Seurat cluster : All samples") +
+  theme(legend.position = "right")
+##########################################################################################################
+
+spatial_coords<-Seurat_object@reductions$spatial@cell.embeddings %>% as.data.frame()
+head(spatial_coords)
+
+A_barcode<-spatial_coords[spatial_coords$spatial_1<15000,] %>% rownames()
+Seurat_A <- subset(Seurat_object, cells = A_barcode)
+DimPlot(Seurat_A, reduction = "spatial", group.by = "seurat_clusters", label = TRUE)
+##########################################################################################################
+DimPlot(Seurat_A, reduction = "umap", group.by = "seurat_clusters", label = TRUE) +
+  ggtitle("Seurat cluster : Sample A") +
+  theme(legend.position = "right")
+DimPlot(Seurat_A, reduction = "umap", group.by = "seurat_clusters", label = F) +
+  ggtitle("Seurat cluster : Sample A") +
+  theme(legend.position = "right")
+##########################################################################################################
+
+#3
+B_barcode<-spatial_coords[spatial_coords$spatial_1>15000&spatial_coords$spatial_1<33000,] %>% rownames()
+Seurat_B <- subset(Seurat_object, cells = B_barcode)
+DimPlot(Seurat_B, reduction = "spatial", group.by = "seurat_clusters", label = TRUE)
+##########################################################################################################
+DimPlot(Seurat_B, reduction = "umap", group.by = "seurat_clusters", label = TRUE) +
+  ggtitle("Seurat cluster : Sample B")
+DimPlot(Seurat_B, reduction = "umap", group.by = "seurat_clusters", label = F) +
+  ggtitle("Seurat cluster : Sample B")
+##########################################################################################################
+
+#4
+C_barcode<-spatial_coords[spatial_coords$spatial_1>33000,] %>% rownames()
+Seurat_C <- subset(Seurat_object, cells = C_barcode)
+DimPlot(Seurat_C, reduction = "spatial", group.by = "seurat_clusters", label = TRUE)
+##########################################################################################################
+DimPlot(Seurat_C, reduction = "umap", group.by = "seurat_clusters", label = TRUE) +
+  ggtitle("Seurat cluster : Sample C")
+DimPlot(Seurat_C, reduction = "umap", group.by = "seurat_clusters", label = F) +
+  ggtitle("Seurat cluster : Sample C")
+##########################################################################################################
+
+Idents(Seurat_object) <- Seurat_object@meta.data$seurat_clusters
+
+#Module 1: Cell Type Annotation and Tissue-of-Origin Identification Based on spatial transcriptomics data, this module identifies and confirms the cell types and their tissue origins in each sample.
+
+#for markers
+marker_sel<-read.csv("marker_sel_1.csv")
+marker_sel$note.abb<-paste(marker_sel$note.abb,marker_sel$gene,sep=" - ")
+
+nrow(marker_sel)
+
+setdiff(marker_sel$gene,intersect(rownames(Seurat_object@assays$RNA$data),marker_sel$gene))
+
+med_a_1<-cbind(get_umap_center(Seurat_object,union_method="ward.D2"),get_umap_center(Seurat_object,union_method="ward.D2")) %>% as.data.frame()
+colnames(med_a_1)<-c("C1","C2")
+
+for_bubble_plot_fast(Seurat_object,"seurat_clusters",
+                     marker_sel[1:24,],"gene","note.abb",
+                     med_a_1,"C1","C2",
+                     "lightskyblue1","red")
+for_bubble_plot_fast(Seurat_object,"seurat_clusters",
+                     marker_sel[25:nrow(marker_sel),],"gene","note.abb",
+                     med_a_1,"C1","C2",
+                     "lightskyblue1","red")
+
+##########################################################################################################
+for_bubble_plot_fast(Seurat_object,"seurat_clusters",
+                     marker_sel[1:nrow(marker_sel),],"gene","note.abb",
+                     med_a_1,"C1","C2",
+                     "lightskyblue1","red")
+##########################################################################################################
+
+cluster_to_celltype <- c(
+  "0" = "GC/LC",
+  "1" = "GC/LC",
+  "2" = "OSC",#Ovarian Stromal Cells
+  "3" = "GC/LC",
+  "4" = "GC",
+  "5" = "LC",
+  "6" = "F",
+  "7" = "Pre - GC",
+  "8" = "LC",
+  "9" = "LC",
+  "10" = "Mye",
+  "11" = "SMC",
+  "12" = "F",
+  "13" = "MC",   
+  "14" = "F",
+  "15" = "EnC",
+  "16" = "EnC",
+  "17" = "EpC",
+  "18" = "F - OSC",#Fibroblast-like Ovarian Stromal Cells
+  "19" = "GC",
+  "20" = "Ad",
+  "21" = "EpC",
+  "22" = "N",
+  "23" = "EpC",
+  "24" = "LC",
+  "25" = "EpC",
+  "26" = "OO"
+)
+
+celltype_colors <- c("GC/LC"="springgreen3",
+                     #"ThC"="limegreen",
+                     "OSC"="lawngreen",
+                     "GC"="green3",
+                     "LC"="forestgreen",
+                     "F"="orange",
+                     "Pre - GC"="palegreen1",
+                     "Mye"="darkorange3",
+                     "SMC"="red",
+                     "MC"="mediumvioletred",
+                     "EnC"="violet",
+                     "EpC"="blue",
+                     "F - OSC"="khaki1",
+                     "Ad"="turquoise2",
+                     "N"="gray",
+                     "OO"="tomato"
+)
+
+Seurat_object@meta.data$cell_type <- cluster_to_celltype[as.character(Seurat_object@meta.data$seurat_clusters)]
+
+Seurat_object@meta.data$cell_type <- factor(Seurat_object@meta.data$cell_type, 
+                                            levels = unique(cluster_to_celltype))
+
+categories_cluster <- unique(cluster_to_celltype)
+categories_colors <- names(celltype_colors)
+setdiff(categories_cluster, categories_colors)
+setdiff(categories_colors, categories_cluster)
+
+##########################################################################################################
+p_custom <- DimPlot(Seurat_object, reduction = "umap", group.by = "cell_type", label = T, repel = T, 
+                    cols = celltype_colors ) +
+  ggtitle("Cell Types in umap") +
+  theme(legend.position = "right")
+print(p_custom)
+p_custom <- DimPlot(Seurat_object, reduction = "umap", group.by = "cell_type", label = F, repel = T, 
+                    cols = celltype_colors ) +
+  ggtitle("Cell Types in umap") +
+  theme(legend.position = "right")
+print(p_custom)
+##########################################################################################################
+
+#Module 2: Spatial Mapping and Visualization of Cell Types Annotated cell type information is overlaid onto the original spatial images of ovarian sections to visualize the spatial distribution of different cell types.
+
+setwd("D:/base_on_rds_result")
+img1 <- readPNG("M_endo_1_2_4_aligned_DAPI.png")
+
+spatial_data<-Seurat_object@reductions$spatial@cell.embeddings %>% as.data.frame()
+head(spatial_data)
+
+head(Seurat_object@meta.data)
+
+all(rownames(Seurat_object@meta.data)==rownames(spatial_data))
+
+spatial_data$cell_type<-Seurat_object$cell_type
+
+##########################################################################################################
+p_custom_ggplot2 <- ggplot(spatial_data, aes(x = spatial_1, y = spatial_2, color = cell_type)) +
+  annotation_custom(
+    rasterGrob(img1, width = unit(1, "npc"), height = unit(1, "npc")),
+    xmin = 0, xmax = 55128, ymin = 0, ymax = 19906) +
+  geom_point(size = 1.2) +      #size = 1.2
+  scale_color_manual(values = celltype_colors) +  
+  ggtitle("Cell Types in spatial") +
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(size = 15), 
+    axis.text.y = element_text(size = 15),  
+    axis.title = element_text(size = 15),  
+    plot.title = element_text(size = 20, hjust = 0.5),  #
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    legend.text = element_text(size = 12),          
+    legend.title = element_text(size = 15),  
+  )+guides(color = guide_legend(override.aes = list(size = 4)))
+
+print(p_custom_ggplot2)
+##########################################################################################################
+
+head(spatial_data)
+
+100/0.2653
+#1px is 0.2653um
+
+#Module 3: Spatial Grid Partitioning Based on Signature Cells The ovarian section is divided into regular grid units. Each grid is automatically classified as either normal ovarian tissue or an endometriotic lesion on the ovarian surface, based on the presence or absence of specific marker cells within the grid.
+
+med_b_1<-slice_boxcut(spatial_data,"spatial_1","spatial_2",376.9318)
+head(med_b_1)
+
+#
+cluster_to_celltype
+osc_cluster<-c(0,1,2,3,4,5,7,8,9,19,24,26)
+
+med_b_1<-med_b_1[Seurat_object@meta.data %>% rownames(),]
+head(med_b_1)
+med_b_1<-cbind(med_b_1,Seurat_object@meta.data[,c("seurat_clusters","cell_type")])
+med_b_1$is_osc_cluster_1<-ifelse(med_b_1$seurat_clusters %in% osc_cluster, 1,0)
+
+med_b_2<-slice_boxsel_base_on_targetcell(med_b_1,"x","y","cell_id","is_osc_cluster_1",1,1)
+
+med_b_2
+
+head(med_b_1)
+med_b_1$is_in_ovary_box<-ifelse(med_b_1$cell_id %in% med_b_2$cell_id, "ovary box","endo box")
+head(Seurat_object@meta.data)
+
+Seurat_object@meta.data$is_in_ovary_box<-med_b_1$is_in_ovary_box
+
+DimPlot(Seurat_object, reduction = "umap", group.by = "is_in_ovary_box", label = F)+
+  ggtitle("UMAP: Cell loaction") 
+
+#Module 4: Validation Against Histopathological Gold Standard The automated segmentation results derived from spatial transcriptomics are compared with manually annotated tissue regions by pathologists to evaluate consistency and validate the accuracy of the computational method.
+img1 <- readPNG("cut_slice.png")
+
+spatial_data<-Seurat_object@reductions$spatial@cell.embeddings %>% as.data.frame()
+head(spatial_data)
+
+head(Seurat_object@meta.data)
+
+spatial_data$is_in_ovary_box<-Seurat_object$is_in_ovary_box
+
+##########################################################################################################
+p_custom_ggplot2 <- ggplot(spatial_data, aes(x = spatial_1, y = spatial_2, color = is_in_ovary_box)) +
+  annotation_custom(
+    rasterGrob(img1, width = unit(1, "npc"), height = unit(1, "npc")),
+    xmin = 0, xmax = 55128, ymin = 0, ymax = 19906) +
+  geom_point(size = 1) +
+  scale_color_manual(values = c("ovary box" = "purple", "endo box" = "forestgreen")) +  
+  ggtitle("tissue box in spatial") +
+  theme_minimal()+
+  theme(
+    axis.text.x = element_text(size = 15), 
+    axis.text.y = element_text(size = 15),  
+    axis.title = element_text(size = 15),  
+    plot.title = element_text(size = 20, hjust = 0.5),  #
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    legend.text = element_text(size = 12),          
+    legend.title = element_text(size = 15),  
+  )+guides(color = guide_legend(override.aes = list(size = 4)))
+
+
+print(p_custom_ggplot2)
+##########################################################################################################
+spatial_data<-Seurat_object@reductions$spatial@cell.embeddings %>% as.data.frame()
+head(spatial_data)
+spatial_data$is_in_ovary_box<-Seurat_object$is_in_ovary_box
+
+#for get color 
+img_dims <- dim(img1)  # [height, width, channels]
+img_height <- img_dims[1]
+img_width <- img_dims[2]
+
+#
+xmin <- 0
+xmax <- 55128
+ymin <- 0
+ymax <- 19906
+
+#map
+map_to_pixel <- function(spatial_1, spatial_2, img_width, img_height, xmin, xmax, ymin, ymax) {
+  norm_x <- (spatial_1 - xmin) / (xmax - xmin)
+  norm_y <- (spatial_2 - ymin) / (ymax - ymin)
+  
+  pixel_x <- norm_x * img_width
+  pixel_y <- (1 - norm_y) * img_height  #
+  
+  pixel_x <- pmin(pmax(round(pixel_x), 1), img_width)
+  pixel_y <- pmin(pmax(round(pixel_y), 1), img_height)
+  
+  return(c(pixel_x, pixel_y))
+}
+
+#
+get_pixel_color <- function(img, pixel_x, pixel_y) {
+  rgb_vals <- img[pixel_y, pixel_x, 1:3]  #
+  hex_color <- rgb(rgb_vals[1], rgb_vals[2], rgb_vals[3])
+  return(hex_color)
+}
+
+spatial_data <- spatial_data %>%
+  rowwise() %>%
+  mutate(
+    pixel_coords = list(map_to_pixel(spatial_1, spatial_2, img_width, img_height, xmin, xmax, ymin, ymax)),
+    pixel_x = pixel_coords[1],
+    pixel_y = pixel_coords[2],
+    color = get_pixel_color(img1, pixel_x, pixel_y)
+  ) %>%
+  ungroup()
+
+head(spatial_data)
+
+spatial_data$color_red<-col2rgb(spatial_data$color)["red",]
+spatial_data$color_green<-col2rgb(spatial_data$color)["green",]
+spatial_data$color_blue<-col2rgb(spatial_data$color)["blue",]
+
+spatial_data$is_red_or_blue<-"NO"
+spatial_data$is_red_or_blue[spatial_data$color_red>200]<-"red"
+spatial_data$is_red_or_blue[spatial_data$color_blue>200]<-"blue"
+
+spatial_data<-as.data.frame(spatial_data)
+head(spatial_data)
+
+spatial_data<-spatial_data[!spatial_data$is_red_or_blue=="NO",]
+
+plot(spatial_data$spatial_1,spatial_data$spatial_2,col=spatial_data$color)
+
+#for A
+spatial_data_A<-spatial_data[spatial_data$spatial_1<15000,]
+plot(spatial_data_A$spatial_1,spatial_data_A$spatial_2,col=spatial_data_A$color)
+table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue)
+table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue)/sum(table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue))
+
+#for B
+spatial_data_A<-spatial_data[spatial_data$spatial_1>15000&spatial_data$spatial_1<34000,]
+plot(spatial_data_A$spatial_1,spatial_data_A$spatial_2,col=spatial_data_A$color)
+table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue)
+table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue)/sum(table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue))
+
+#for C
+spatial_data_A<-spatial_data[spatial_data$spatial_1>30000&spatial_data$spatial_1<40000,]
+plot(spatial_data_A$spatial_1,spatial_data_A$spatial_2,col=spatial_data_A$color)
+table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue)
+table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue)/sum(table(spatial_data_A$is_in_ovary_box,spatial_data_A$is_red_or_blue))
+
+
+head(med_b_1)
+##########################################################################################################
+
+#Module 5: Inter-tissue Heterogeneity Analysis Systematic comparisons are performed between ovarian tissue and endometriotic lesions in terms of cellular composition proportions and gene expression profiles, revealing their molecular and cellular microenvironmental characteristics.
+get_box_Component(med_b_1[med_b_1$is_in_ovary_box=="endo box",]$cell_id,
+                  med_b_1,
+                  "cell_id",
+                  "cell_type",
+                  "endo box : component",
+                  color = "tomato") 
+get_box_Component(med_b_1[med_b_1$is_in_ovary_box=="ovary box",]$cell_id,
+                  med_b_1,
+                  "cell_id",
+                  "cell_type",
+                  "ovary box : component",
+                  color = "turquoise3")
+##########################################################################################################
+
+
+#for Ldha
+mean_exp_Ldha<-for_type_gene_exp(Seurat_object,unique(Seurat_object@meta.data$cell_type) %>% as.vector(),"cell_type","Ldha") %>% sort()
+
+df <- data.frame(
+  cell_type = names(mean_exp_Ldha),
+  Ldha = as.numeric(mean_exp_Ldha),
+  stringsAsFactors = FALSE
+)
+
+df
+##########################################################################################################
+ggplot(df, aes(x = reorder(cell_type, Ldha), y = Ldha)) +
+  geom_bar(stat = "identity", fill = "palegreen3") +          
+  coord_flip() +                                             
+  labs(
+    title = "Ldha Gene Expression Across Cell Types",
+    x = "Cell Type",
+    y = "Ldha"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0, face = "bold", size = 14), 
+    axis.title.x = element_text(size = 14),  
+    axis.title.y = element_text(size = 14),  
+    axis.text.y = element_text(size = 12, color = "black"),  
+    axis.line.x = element_line(color = "black", linewidth = 0.5),  #
+    axis.line.y = element_line(color = "black", linewidth = 0.5),  # 
+    panel.grid = element_blank(),  # 
+    panel.grid.major.y = element_blank()
+    #plot.margin = margin(10, 20, 10, 10)
+  )  
+##########################################################################################################
+
+endo_box<-get_box_Component(med_b_1[med_b_1$is_in_ovary_box=="endo box",]$cell_id,
+                            med_b_1,
+                            "cell_id",
+                            "cell_type",
+                            "Endo box : component",
+                            color="tomato") 
+ovary_box<-get_box_Component(med_b_1[med_b_1$is_in_ovary_box=="ovary box",]$cell_id,
+                             med_b_1,
+                             "cell_id",
+                             "cell_type",
+                             "Ovary box : component",
+                             color="turquoise3")
+
+endo_box
+ovary_box
+
+endo_long <- data.frame(
+  CellType = names(endo_box),
+  Value = as.numeric(endo_box),
+  Group = "Endo box",
+  stringsAsFactors = FALSE
+)
+endo_long
+
+ovary_long <- data.frame(
+  CellType = names(ovary_box),
+  Value = as.numeric(ovary_box),
+  Group = "Ovary box",
+  stringsAsFactors = FALSE
+)
+ovary_long
+
+box_plot_data <- rbind(endo_long, ovary_long)
+box_plot_data$Value<-round(as.numeric(box_plot_data$Value),2)
+box_plot_data
+
+group_frame<-box_plot_data
+col_x<-"CellType"
+col_group<-"Group"
+y<-"Value"
+gg_title<-"Endo vs Ovary Comparison"
+gg_y<-"(%)"
+
+##########################################################################################################
+ggplot(group_frame, aes_string(x = col_x, y = y, fill = col_group)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.8) +  
+  scale_fill_manual(values = c("Ovary box" = "turquoise3", "Endo box" = "tomato")) +  
+  geom_text(aes(label = get(y)), position = position_dodge(width = 0.8), vjust = -0.5, size = 4)+
+  labs(title = gg_title, 
+       y = gg_y, 
+       x = "") +  
+  theme_minimal() +  #
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 15), 
+    axis.text.y = element_text(size = 10),  
+    axis.title = element_text(size = 15),  
+    plot.title = element_text(size = 15, hjust = 0),  #
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5)
+  )
+##########################################################################################################
+
+#for ut/ov epc
+setwd("D:/base_on_rds_result")
+
+idx<-unique(Seurat_object@meta.data$cell_type)
+idx  
+
+idx_clean <- gsub("[ /-]", "_", idx)
+idx_clean <- gsub("_+", "_", idx_clean)
+idx_clean <- gsub("^_|_$", "", idx_clean)
+##########################################################################################################
+for(i in 1:length(idx)){
+  #png(paste0(idx_clean[i], "_spatial.png"), width = 2212/2, height = 800/2, res= 96)#res is 96 !!!!!!!
+  
+  p<-plot_cell(Seurat_object,rownames(Seurat_object@meta.data[Seurat_object$cell_type==idx[i],]),"spatial",idx[i])
+  print(p)
+  #dev.off()
+}
+##########################################################################################################
+
+#Module 6: Distance-Based Transcriptomic Analysis Using specific cell types as centers, Euclidean distances between target cells and the center cells are calculated. This module analyzes how the expression of specific genes in target cells correlates with their spatial distance from the center.
+
+#for Ad,EC.MC
+#re-marker
+
+#data from: https://www.cell.com/cms/10.1016/j.cell.2024.01.021/attachment/b3638602-e437-4d90-98fd-cbe259b8c06b/mmc2.xlsx
+#The cycling and aging mouse female reproductive tract at single-cell resolution
+#PMID: 38325365
+
+# ov is ovary
+# od is oviduct
+# ut is uterus
+# ce is cervix
+# va is vagina
+# sp is spleen
+
+setwd("D:/base_on_rds_result")
+mmc2<-read.csv("mmc2.csv")
+head(mmc2)
+
+#sel ov and ut
+mmc2<-mmc2[grepl("ut|ov", mmc2$Tissue), ]
+mmc2
+nrow(mmc2)
+
+#trans to long
+mmc2$Marker <- gsub(" ", "", mmc2$Marker)
+mmc2_long <- mmc2 %>%
+  separate_rows(Marker , sep = ",\\s*")  
+
+mmc2_long[duplicated(mmc2_long) | duplicated(mmc2_long, fromLast = TRUE), ]
+#becase of "Gdf7,Fshr,Gja4,Pgr,Amh,Wt1,Areg,Ereg,Btc,Star,Pgr,Fshr,Cyp19a1,Fgfr1,Foxl2"...
+mmc2_long<-mmc2_long[!duplicated(mmc2_long), ]
+mmc2_long
+
+#get intersec with Seu
+mmc2_long<-mmc2_long[mmc2_long$Marker %in% c(Seurat_object@assays$RNA$data %>% rownames()),]
+
+#add markers
+head(mmc2_long)
+nrow(mmc2_long)
+mmc2_long<-as.data.frame(mmc2_long)
+
+nrow(mmc2_long)
+#
+
+head(mmc2_long)
+mmc2_long$note<-paste(mmc2_long$Marker,"-",mmc2_long$Cell.type.abbreviation, "-","(",mmc2_long$Tissue,")")
+#
+unique(mmc2_long$Cell.type)
+
+#sel
+mmc2
+
+c("EC","EpC","MC","CEpC","GlC","CC")
+
+for_bubble_plot_fast(Seurat_object,"seurat_clusters",
+                     mmc2_long[mmc2_long$Cell.type %in% c("EC","EpC","F","MC","CEpC","GlC","CC"),],"Marker","note",
+                     med_a_1,"C1","C2",
+                     "lightskyblue1","red")
+
+cluster_to_celltype[cluster_to_celltype=="Ad"]
+cluster_to_celltype[cluster_to_celltype=="MC"]
+cluster_to_celltype[cluster_to_celltype=="EpC"]
+
+med_a_2<-cbind(c(20,13,17,21,23,25),
+               c(20,13,17,21,23,25)) %>% as.data.frame()
+colnames(med_a_2)<-c("C1","C2")
+med_a_2
+med_a_2$C2<-paste(c("Ad","MC","EpC","EpC","EpC","EpC"),med_a_2$C2,sep = " - ")
+test_Seurat<- subset(Seurat_object, subset = cell_type %in% c("Ad", "MC", "EpC"))
+
+med_a_3<-mmc2_long[mmc2_long$Cell.type %in% c("EC","EpC","MC","CEpC","GlC","CC"),]
+med_a_3 %>% head()
+med_a_3$note<-gsub("ov, od, ut, va, ce","ov, ut",med_a_3$note)
+
+##########################################################################################################
+for_bubble_plot_fast(test_Seurat,"seurat_clusters",
+                     med_a_3,"Marker","note",
+                     med_a_2,"C1","C2",
+                     "lightskyblue1","red")
+##########################################################################################################
+
+#sel 17,23,25
+endo_cluster<-c(17,23,25)
+
+plot_cell(Seurat_object,rownames(Seurat_object@meta.data[Seurat_object@meta.data$seurat_clusters=="17",]),"spatial","17")
+plot_cell(Seurat_object,rownames(Seurat_object@meta.data[Seurat_object@meta.data$seurat_clusters=="21",]),"spatial","21")
+plot_cell(Seurat_object,rownames(Seurat_object@meta.data[Seurat_object@meta.data$seurat_clusters=="23",]),"spatial","23")
+plot_cell(Seurat_object,rownames(Seurat_object@meta.data[Seurat_object@meta.data$seurat_clusters=="25",]),"spatial","25")
+
+osc_cluster
+beforeLC_osc_cluster<-c(setdiff(osc_cluster,c(9,8,5,24)))
+beforeLC_osc_cluster
+
+get_spatial_distance(Seurat_object,"spatial",spatial_coords[,c("spatial_1","spatial_2")],
+                     rownames(Seurat_object@meta.data[Seurat_object$seurat_clusters %in% endo_cluster,]),
+                     rownames(Seurat_object@meta.data[Seurat_object$seurat_clusters %in% beforeLC_osc_cluster,]))
+
+##########################################################################################################
+cell_dist_marker_found(Seurat_object,spatial_coords[,c("spatial_1","spatial_2")],c("Ldha"),
+                       rownames(Seurat_object@meta.data[Seurat_object$seurat_clusters %in% endo_cluster,]),
+                       rownames(Seurat_object@meta.data[Seurat_object$seurat_clusters %in% beforeLC_osc_cluster,]),
+                       150,
+                       0.2653,
+                       "endo_cluster: 17,23,25","GC_cluster: 0,1,2,3,4,7,19,26")
+##########################################################################################################
+endo_rawosc_dist_frame<-get_spatial_distance(Seurat_object,"spatial",spatial_coords[,c("spatial_1","spatial_2")],
+                                             rownames(Seurat_object@meta.data[Seurat_object$seurat_clusters %in% endo_cluster,]),
+                                             rownames(Seurat_object@meta.data[Seurat_object$seurat_clusters %in% beforeLC_osc_cluster,]))
+head(endo_rawosc_dist_frame)
+
+endo_rawosc_dist_frame_scaleexp<-dist_scale_frame_sel(Seurat_object,c("Hk2","Pkm","Ldha","Pfkl","Pfkp","Pfkm"),
+                                                      endo_rawosc_dist_frame,
+                                                      "px",150/0.2653)
+
+endo_rawosc_dist_frame_scaleexp %>% head()
+
+endo_rawosc_dist_frame_scaleexp$um<-endo_rawosc_dist_frame_scaleexp$px*0.2653
+
+get_cor_frame(endo_rawosc_dist_frame_scaleexp,"px",c("Hk2","Pkm","Ldha","Pfkl","Pfkp","Pfkm"))
+##########################################################################################################
+
+for(i in c("Hk2","Pkm","Ldha","Pfkl","Pfkp","Pfkm")){
+  gene <- i
+  plot_gene_exp_vs_dist(endo_rawosc_dist_frame_scaleexp, "um", i)
+}
+
+##########################################################################################################
+
+
+#15000 and 33000
+test_Seu<-Seurat_object
+
+DimPlot(test_Seu, reduction = "spatial", group.by = "cell_type", label = T, repel = T, 
+        cols = celltype_colors ) +
+  ggtitle("Cell Types in umap") +
+  theme(legend.position = "right")+geom_vline(xintercept = 15000)+geom_vline(xintercept = 33000)
+
+
+spatial_med<-test_Seu@reductions$spatial@cell.embeddings %>% as.data.frame()
+head(spatial_med)
+
+all(rownames(test_Seu@meta.data)==rownames(spatial_med))
+#
+
+test_Seu@meta.data$from<-"B"
+
+test_Seu@meta.data$from<-ifelse(
+  rownames(test_Seu@meta.data) %in% rownames(spatial_med[spatial_med$spatial_1<15000,]),
+  "A",
+  test_Seu@meta.data$from)
+
+test_Seu@meta.data$from<-ifelse(
+  rownames(test_Seu@meta.data) %in% rownames(spatial_med[spatial_med$spatial_1>33000,]),
+  "C",
+  test_Seu@meta.data$from)
+
+test_Seu@meta.data %>% head()
+
+DimPlot(test_Seu, reduction = "spatial", group.by = "from", label = T, repel = T) +
+  ggtitle("Cell Types in umap") +
+  theme(legend.position = "right")
+
+test_Seu@meta.data$from_note<-paste(test_Seu@meta.data$is_in_ovary_box,test_Seu@meta.data$from,sep="_")
+
+for_type_gene_exp(test_Seu,unique(test_Seu$from_note) %>% as.vector(),"from_note","Ldha") 
+for_type_gene_exp(test_Seu,unique(test_Seu$from_note) %>% as.vector(),"from_note","Pkm") 
+for_type_gene_exp(test_Seu,unique(test_Seu$from_note) %>% as.vector(),"from_note","Hk2") 
+for_type_gene_exp(test_Seu,unique(test_Seu$from_note) %>% as.vector(),"from_note","Pfkl") 
+for_type_gene_exp(test_Seu,unique(test_Seu$from_note) %>% as.vector(),"from_note","Pfkm") 
+
+#
+genes <- c("Ldha", "Pkm", "Hk2", "Pfkl", "Pfkm")
+
+samples <- unique(test_Seu$from_note) %>% as.vector()
+
+expr_matrix <- sapply(genes, function(gene) {
+  res <- for_type_gene_exp(test_Seu, samples, "from_note", gene)
+  return(res[samples])
+})
+
+expr_matrix <- t(expr_matrix)
+
+dim(expr_matrix)
+rownames(expr_matrix) <- genes
+colnames(expr_matrix) <- samples
+
+tissue_group <- sapply(strsplit(colnames(expr_matrix), " "), `[`, 1)
+box_id      <- sapply(strsplit(colnames(expr_matrix), " "), `[`, 2)
+
+annotation_col <- data.frame(
+  Tissue = tissue_group,
+  Box    = box_id,
+  row.names = colnames(expr_matrix)
+)
+
+expr_matrix
+
+pheatmap(
+  expr_matrix,
+  cluster_rows = FALSE,    
+  cluster_cols = FALSE,    
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  color = colorRampPalette(c("white", "tomato"))(100),
+  border_color = NA,
+  scale = "none"           
+)
+
+
+FindMarkers(
+  Seurat_object,
+  ident.1 = "ovary box",
+  ident.2 = "endo box",
+  group.by = "is_in_ovary_box",
+  logfc.threshold = 0,
+  features =  c("Ldha", "Pkm", "Hk2", "Pfkl", "Pfkm")          #
+)
+
+#The code for this project was written by Liu Zhan'ao, from June to September 2025.
+
+##########################################################################################################
+for(i in c("Hk2","Pkm","Ldha","Pfkl","Pfkp","Pfkm")){
+  gene <- i
+  plot_data <- FetchData(Seurat_object, vars = c("UMAP_1", "UMAP_2", gene))
+  head(plot_data)
+  
+  plot_data <- plot_data[order(plot_data[[gene]]), ]
+  
+  p<-ggplot(plot_data, aes(x = UMAP_1, y = UMAP_2, color = !!sym(gene))) +
+    geom_point(size = 1.5) +
+    scale_color_gradient(low = "lightskyblue1", high = "red") +
+    labs(title = paste("UMAP: Expression of", gene), color = gene) + 
+    theme_minimal()+
+    theme(
+      axis.text.x = element_text(size = 15), 
+      axis.text.y = element_text(size = 15),  
+      axis.title = element_text(size = 15),  
+      plot.title = element_text(size = 20, hjust = 0.5),  #
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      legend.text = element_text(size = 12),          
+      legend.title = element_text(size = 15), 
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA)
+    )+guides(color = guide_legend(override.aes = list(size = 4)))
+  print(p)
+}
+
+
+for(i in c("Hk2","Pkm","Ldha","Pfkl","Pfkp","Pfkm")){
+  gene <- i
+  plot_data <- FetchData(Seurat_object, vars = c("spatial_1","spatial_2", gene))
+  head(plot_data)
+  
+  plot_data <- plot_data[order(plot_data[[gene]]), ]
+  
+  p<-ggplot(plot_data, aes(x = spatial_1, y = spatial_2, color = !!sym(gene))) +
+    geom_point(size = 1.5) +
+    scale_color_gradient(low = "lightskyblue1", high = "red") +
+    labs(title = paste("Spatial: Expression of", gene), color = gene) + 
+    theme_minimal()+
+    theme(
+      axis.text.x = element_text(size = 15), 
+      axis.text.y = element_text(size = 15),  
+      axis.title = element_text(size = 15),  
+      plot.title = element_text(size = 20, hjust = 0.5),  #
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.minor.y = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      legend.text = element_text(size = 12),          
+      legend.title = element_text(size = 15), 
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA)
+    )+guides(color = guide_legend(override.aes = list(size = 4)))
+  print(p)
+}
+# 
+
+
+
