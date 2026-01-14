@@ -1,41 +1,43 @@
-# Spatial_Ovary-Mouse_endometriosis_model
-For analyzing ovarian sections from endometriosis model mice ( Spatial transcriptomic )
+# Spatial_Mouse_endometriosis_ovary_model
 
-This resource provides a complete set of R scripts for spatial transcriptomic analysis of ovarian tissue sections from a mouse model of endometriosis. The analytical pipeline is organized into six core modules:
+This repository provides a complete set of R scripts for spatial transcriptomics data analysis of ovarian sections from a mouse model of endometriosis. 
+The entire analytical pipeline is divided into six core modules:
 
-Module 1: Cell Type Annotation and Tissue-of-Origin Assignment
-Cell types and their tissue origins are identified and validated using spatial transcriptomics data across all samples.
+Module 1: Cell Type Annotation and Tissue-of-Origin Identification
+Based on spatial transcriptomics data, this module identifies and confirms the cell types and their tissue origins in each sample.
 
-Module 2: Spatial Mapping of Cell Types
-Annotated cell type information is overlaid onto the original spatial images of ovarian sections to visualize the spatial distribution of distinct cell populations.
+Module 2: Spatial Mapping and Visualization of Cell Types
+Annotated cell type information is overlaid onto the original spatial images of ovarian sections to visualize the spatial distribution of different cell types.
 
-Module 3: Grid-Based Spatial Segmentation Using Signature Cells
-The ovarian section is partitioned into regular grid cells. Each grid cell is automatically classified as either normal ovarian tissue or an endometriotic lesion on the ovarian surface, based on the presence or absence of predefined signature cell types within it.
+Module 3: Spatial Grid Partitioning Based on Signature Cells
+The ovarian section is divided into regular grid units. Each grid is automatically classified as either normal ovarian tissue or an endometriotic lesion on the ovarian surface, based on the presence or absence of specific marker cells within the grid.
 
-Module 4: Validation Against Pathologist-Defined Ground Truth
-The computationally derived segmentation (from Module 3) is quantitatively compared with manual annotations provided by a pathologist to assess concordance and validate the accuracy of the automated approach.
+Module 4: Validation Against Histopathological Gold Standard
+The automated segmentation results derived from spatial transcriptomics are compared with manually annotated tissue regions by pathologists to evaluate consistency and validate the accuracy of the computational method.
 
-Module 5: Inter-Tissue Heterogeneity Analysis
-Systematic comparisons are performed between ovarian tissue and endometriotic lesions with respect to cellular composition and gene expression profiles, revealing distinct molecular and microenvironmental characteristics.
+Module 5: Inter-tissue Heterogeneity Analysis
+Systematic comparisons are performed between ovarian tissue and endometriotic lesions in terms of cellular composition proportions and gene expression profiles, revealing their molecular and cellular microenvironmental characteristics.
 
-Module 6: Distance-Dependent Transcriptomic Analysis
-For a specified cell type of interest, Euclidean distances are computed from each target cell to the nearest cell of the reference type. The relationship between these spatial distances and the expression levels of selected genes in target cells is then analyzed to infer potential distance-dependent regulatory effects.
+Module 6: Distance-Based Transcriptomic Analysis
+Using specific cell types as centers, Euclidean distances between target cells and the center cells are calculated. This module analyzes how the expression of specific genes in target cells correlates with their spatial distance from the center.
 
-Requirements: An R environment is required to run the scripts.
-Validated Configuration:
-R.version
-platform x86_64-w64-mingw32
-arch x86_64
-os mingw32
-crt ucrt
-system x86_64, mingw32
-major 4
-minor 4.3
-year 2025
-month 02
-day 28
-svn rev 87843
-language R
+Requirements: R environment
+(Verified environment configuration)
+
+> R.version
+               _                                
+platform       x86_64-w64-mingw32               
+arch           x86_64                           
+os             mingw32                          
+crt            ucrt                             
+system         x86_64, mingw32                  
+status                                          
+major          4                                
+minor          4.3                              
+year           2025                             
+month          02                               
+day            28                               
+svn rev        87843                            
+language       R                                
 version.string R version 4.4.3 (2025-02-28 ucrt)
-nickname Trophy Case
-This version uses precise scientific terminology, maintains logical flow, and adheres to conventions common in methods sections of computational biology or spatial omics publications.
+nickname       Trophy Case                      
