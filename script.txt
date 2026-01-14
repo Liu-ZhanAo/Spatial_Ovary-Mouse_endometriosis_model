@@ -17,7 +17,6 @@ library(png)
 library(grid)
 library(grDevices)
 
-
 plot_cell<-function(Seu_ob,cell_name_vec,Seu_meth,note){
   a<-list()
   a$note<-cell_name_vec
