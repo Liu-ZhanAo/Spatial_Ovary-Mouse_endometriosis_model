@@ -1292,8 +1292,6 @@ FindMarkers(
   features =  c("Ldha", "Pkm", "Hk2", "Pfkl", "Pfkm")          #
 )
 
-#The code of this project was written by Liu Zhan'ao, from June to September 2025.
-#China Medical University
 
 ##########################################################################################################
 for(i in c("Hk2","Pkm","Ldha","Pfkl","Pfkp","Pfkm")){
