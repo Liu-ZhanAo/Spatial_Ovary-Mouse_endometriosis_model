@@ -1,5 +1,5 @@
 # Spatial_Ovary-Mouse_endometriosis_model
-For analyzing ovarian sections from endometriosis model mice ( Spatial transcriptomic )Spatial transcriptomic
+For analyzing ovarian sections from endometriosis model mice ( Spatial transcriptomic )
 
 This resource provides a complete set of R scripts for spatial transcriptomic analysis of ovarian tissue sections from a mouse model of endometriosis. The analytical pipeline is organized into six core modules:
 
